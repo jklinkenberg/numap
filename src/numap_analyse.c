@@ -254,7 +254,8 @@ int numap_sampling_print(struct numap_sampling_measure *measure, char print_samp
   	}
   	total_count++;
 	if (print_samples) {
-	  printf("pc=%" PRIx64 ", @=%" PRIx64 ", src level=%s, latency=%" PRIu64 "\n", sample->ip, sample->addr, get_data_src_level(sample->data_src), sample->weight);
+	  //printf("pc=%" PRIx64 ", @=%" PRIx64 ", src level=%s, latency=%" PRIu64 "\n", sample->ip, sample->addr, get_data_src_level(sample->data_src), sample->weight);
+      printf("type=%d, pc=%" PRIx64 ", @=%" PRIx64 ", ds-val=%ld, mem-op=%s, src-level=%s, snoop=%d, latency=%" PRIu64 "\n", header->type, sample->ip, sample->addr, sample->data_src, get_data_src_opcode(sample->data_src), get_data_src_level(sample->data_src), sample->data_src.mem_snoop, sample->weight);
 	}
       }
       consumed += header->size;
