@@ -74,6 +74,13 @@ static void get_archi(unsigned int archi_id, struct archi * arch) {
     snprintf(arch->sampling_write_event, 256, "MEM_INST_RETIRED:ALL_STORES");
     break;
 
+  case CPU_MODEL(6, 106):
+    snprintf(arch->name, 256, "Ice Lake micro arch");
+    /* Not tested. Let's assume these events are the same as the previous cpu generation */
+    snprintf(arch->sampling_read_event, 256, "MEM_TRANS_RETIRED:LOAD_LATENCY_GT_4");
+    snprintf(arch->sampling_write_event, 256, "MEM_INST_RETIRED:ALL_STORES");
+    break;
+
   case CPU_MODEL(6, 125):
   case CPU_MODEL(6, 126):
     snprintf(arch->name, 256, "Ice Lake micro arch");
