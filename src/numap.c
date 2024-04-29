@@ -31,6 +31,7 @@ struct archi {
   char sampling_write_event[256];
   char counting_read_event[256];
   char counting_write_event[256];
+  int requires_auxiliary_event;
 };
 
 /* If your Intel CPU is not supported by Numap, you need to add a new architecture:
@@ -43,7 +44,7 @@ struct archi {
 
 static void get_archi(unsigned int archi_id, struct archi * arch) {
   arch->id=archi_id;
-
+  arch->requires_auxiliary_event = 0;
   snprintf(arch->name, 256, "Unknown architecture");
   snprintf(arch->sampling_read_event, 256, NOT_SUPPORTED);
   snprintf(arch->sampling_write_event, 256, NOT_SUPPORTED);
@@ -71,6 +72,7 @@ static void get_archi(unsigned int archi_id, struct archi * arch) {
     /* Not tested. Let's assume these events are the same as the previous cpu generation */
     snprintf(arch->sampling_read_event, 256, "MEM_TRANS_RETIRED:LOAD_LATENCY:ldlat=3");
     snprintf(arch->sampling_write_event, 256, "MEM_INST_RETIRED:ALL_STORES");
+    arch->requires_auxiliary_event = 1;
     break;
 
   case CPU_MODEL(6, 141):
@@ -609,13 +611,14 @@ int numap_sampling_init_measure(struct numap_sampling_measure *measure, int nb_t
   measure->nb_threads = nb_threads;
   measure->sampling_rate = sampling_rate;
   for (thread = 0; thread < measure->nb_threads; thread++) {
+    measure->fd_grp_lead_per_tid[thread] = 0;
     measure->fd_per_tid[thread] = 0;
     measure->metadata_pages_per_tid[thread] = 0;
   }
   measure->handler = NULL;
   measure->total_samples = 0;
   set_signal_handler(refresh_wrapper_handler);
-  measure->nb_refresh = 1000; // default refresh 
+  measure->nb_refresh = 1000; // default refresh
  
   return 0;
 }
@@ -624,12 +627,18 @@ int numap_sampling_init_measure(struct numap_sampling_measure *measure, int nb_t
 static int __numap_sampling_resume(struct numap_sampling_measure *measure) {
   int thread;
   for (thread = 0; thread < measure->nb_threads; thread++) {
+    if(current_archi->requires_auxiliary_event) {
+      ioctl(measure->fd_grp_lead_per_tid[thread], PERF_EVENT_IOC_RESET, 0);
+    }
     ioctl(measure->fd_per_tid[thread], PERF_EVENT_IOC_RESET, 0);
     fcntl(measure->fd_per_tid[thread], F_SETFL, O_ASYNC|O_NONBLOCK);
     fcntl(measure->fd_per_tid[thread], F_SETSIG, SIGIO);
     fcntl(measure->fd_per_tid[thread], F_SETOWN, measure->tids[thread]);
     ioctl(measure->fd_per_tid[thread], PERF_EVENT_IOC_REFRESH, measure->nb_refresh);
     ioctl(measure->fd_per_tid[thread], PERF_EVENT_IOC_ENABLE, 0);
+    if(current_archi->requires_auxiliary_event) {
+      ioctl(measure->fd_grp_lead_per_tid[thread], PERF_EVENT_IOC_ENABLE, 0);
+    }
   }
  return 0;
 }
@@ -647,7 +656,7 @@ int numap_sampling_resume(struct numap_sampling_measure *measure) {
   return __numap_sampling_resume(measure);
 }
 
-int __numap_sampling_start(struct numap_sampling_measure *measure, struct perf_event_attr *pe_attr) {
+int __numap_sampling_start(struct numap_sampling_measure *measure, struct perf_event_attr *pe_attr, struct perf_event_attr *aux_attr) {
 
   /**
    * Check everything is ok
@@ -672,10 +681,30 @@ int __numap_sampling_start(struct numap_sampling_measure *measure, struct perf_e
       continue;
     }
 
-    measure->fd_per_tid[thread] = perf_event_open(pe_attr, measure->tids[thread], cpu,
-                          -1, 0);
+    long fd_grp = -1;
+
+    if(current_archi->requires_auxiliary_event && aux_attr) {
+      fd_grp = measure->fd_grp_lead_per_tid[thread] = perf_event_open(aux_attr, measure->tids[thread], cpu, -1, 0);
+      if (measure->fd_grp_lead_per_tid[thread] == -1) {
+        fprintf(stderr, "Error with perf_event_open of aux_attr: %d %s\n", errno, strerror(errno));
+        return ERROR_PERF_EVENT_OPEN;
+      }
+    //   else {
+    //     fprintf(stderr, "SUCCESS with perf_event_open of aux_attr --> fd=%ld\n", fd_grp);
+    //   }
+    }
+
+    measure->fd_per_tid[thread] = perf_event_open(pe_attr, measure->tids[thread], cpu, fd_grp, 0);
     if (measure->fd_per_tid[thread] == -1) {
+      fprintf(stderr, "Error with perf_event_open of pe_attr: fd_grp=%ld. Error %d %s\n", fd_grp, errno, strerror(errno));
       return ERROR_PERF_EVENT_OPEN;
+    }
+    // else {
+    //   fprintf(stderr, "SUCCESS with perf_event_open of pe_attr --> fd=%ld\n", measure->fd_per_tid[thread]);
+    // }
+
+    if(!current_archi->requires_auxiliary_event) {
+        measure->fd_grp_lead_per_tid[thread] = measure->fd_per_tid[thread];
     }
     measure->metadata_pages_per_tid[thread] = mmap(NULL, measure->mmap_len, PROT_WRITE, MAP_SHARED, measure->fd_per_tid[thread], 0);
     if (measure->metadata_pages_per_tid[thread] == MAP_FAILED) {
@@ -734,25 +763,40 @@ int numap_sampling_read_start_generic(struct numap_sampling_measure *measure, ui
     return ERROR_PFM;
   }
 
+  // Auxiliary event parameters
+  struct perf_event_attr aux_attr;
+  memset(&aux_attr, 0, sizeof(aux_attr));
+  aux_attr.size = sizeof(struct perf_event_attr);
+  aux_attr.config = 0x8203;
+  aux_attr.type = 4;
+  aux_attr.sample_period = measure->sampling_rate;
+  aux_attr.sample_type = sample_type;
+  aux_attr.task = 1;
+  aux_attr.precise_ip = 2;
+  aux_attr.disabled = 1;
+  aux_attr.exclude_kernel = 1;
+  aux_attr.exclude_hv = 1;
+
   // Sampling parameters
   pe_attr.sample_period = measure->sampling_rate;
   pe_attr.sample_type = sample_type;
   pe_attr.mmap = 1;
   pe_attr.task = 1;
   pe_attr.precise_ip = 2;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,1,0)
-  pe_attr.use_clockid=1;
-  pe_attr.clockid = CLOCK_MONOTONIC_RAW;
-#else
-#warning NUMAP: using clockid is not possible on kernel version < 4.1. This feature will be disabled.
-#endif
-  // Other parameters
-  pe_attr.disabled = 1;
+  pe_attr.disabled = current_archi->requires_auxiliary_event == 1 ? 0 : 1;
   pe_attr.exclude_kernel = 1;
   pe_attr.exclude_hv = 1;
 
-  return __numap_sampling_start(measure, &pe_attr);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,1,0)
+  if (!current_archi->requires_auxiliary_event) {
+    pe_attr.use_clockid=1;
+    pe_attr.clockid = CLOCK_MONOTONIC_RAW;
+  }
+#else
+#warning NUMAP: using clockid is not possible on kernel version < 4.1. This feature will be disabled.
+#endif
 
+  return __numap_sampling_start(measure, &pe_attr, &aux_attr);
 }
   
 int numap_sampling_read_start(struct numap_sampling_measure *measure) {
@@ -770,6 +814,9 @@ int numap_sampling_read_stop(struct numap_sampling_measure *measure) {
   int thread;
   for (thread = 0; thread < measure->nb_threads; thread++) {
     ioctl(measure->fd_per_tid[thread], PERF_EVENT_IOC_DISABLE, 0);
+    if(current_archi->requires_auxiliary_event) {
+      ioctl(measure->fd_grp_lead_per_tid[thread], PERF_EVENT_IOC_DISABLE, 0);
+    }
   }
   return 0;
 }
@@ -815,7 +862,7 @@ int numap_sampling_write_start_generic(struct numap_sampling_measure *measure, u
   pe_attr.exclude_kernel = 1;
   pe_attr.exclude_hv = 1;
 
-  return __numap_sampling_start(measure, &pe_attr);
+  return __numap_sampling_start(measure, &pe_attr, NULL);
 }
 
 
@@ -840,6 +887,9 @@ int numap_sampling_end(struct numap_sampling_measure *measure) {
   for (thread = 0; thread < measure->nb_threads; thread++) {
     munmap(measure->metadata_pages_per_tid[thread], measure->mmap_len);
     close(measure->fd_per_tid[thread]);
+    if(current_archi->requires_auxiliary_event) {
+      close(measure->fd_grp_lead_per_tid[thread]);
+    }
   }
   return 0;
 }

@@ -52,6 +52,7 @@ struct numap_sampling_measure {
   size_t page_size;
   size_t mmap_len;
   char started;
+  long fd_grp_lead_per_tid[MAX_NB_THREADS];
   long fd_per_tid[MAX_NB_THREADS];
   // overflow related fields
   void (*handler)(struct numap_sampling_measure*, int); // handler called each nb_refresh samples
