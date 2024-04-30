@@ -767,8 +767,9 @@ int numap_sampling_read_start_generic(struct numap_sampling_measure *measure, ui
   struct perf_event_attr aux_attr;
   memset(&aux_attr, 0, sizeof(aux_attr));
   aux_attr.size = sizeof(struct perf_event_attr);
+  // Source: https://github.com/torvalds/linux/blob/e67572cd2204894179d89bd7b984072f19313b03/arch/x86/events/intel/core.c#L4051
   aux_attr.config = 0x8203;
-  aux_attr.type = 4;
+  aux_attr.type = PERF_TYPE_RAW;
   aux_attr.sample_period = measure->sampling_rate;
   aux_attr.sample_type = sample_type;
   aux_attr.task = 1;
